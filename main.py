@@ -1,9 +1,7 @@
 from datetime import datetime
 import html
-import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import webbrowser
 from pathlib import Path
 
 
@@ -31,9 +29,13 @@ class ReceiptApp:
         self.item_price = tk.StringVar()
         self.item_quantity = tk.StringVar(value="1")
         self.status = tk.StringVar(value="Ready for your first item")
+        self.selected_printer = tk.StringVar()
+        self.printer_status = tk.StringVar(value="Loading printers...")
+        self.default_printer_name = ""
 
         self._configure_styles()
         self._build_layout()
+        self._refresh_printers()
         self._refresh_receipt()
 
     def _configure_styles(self):
@@ -186,6 +188,46 @@ class ReceiptApp:
         panel = self._panel(parent, "Receipt preview", "Updates as you add items.")
         panel.pack(fill="both", expand=True)
 
+        printer_row = tk.Frame(panel, bg=self.WHITE)
+        printer_row.pack(fill="x", padx=18, pady=(0, 12))
+        tk.Label(printer_row, text="PRINTER", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(0, 5))
+        printer_controls = tk.Frame(printer_row, bg=self.WHITE)
+        printer_controls.pack(fill="x")
+        self.printer_selector = ttk.Combobox(
+            printer_controls,
+            textvariable=self.selected_printer,
+            state="readonly",
+        )
+        self.printer_selector.pack(side="left", fill="x", expand=True)
+        tk.Button(
+            printer_controls,
+            text="↻",
+            command=self._refresh_printers,
+            bg=self.WHITE,
+            fg=self.INK,
+            activebackground="#f3f6f3",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI", 12),
+            padx=10,
+        ).pack(side="left", padx=(5, 0))
+        tk.Button(
+            printer_controls,
+            text="Set as default",
+            command=self._set_default_printer,
+            bg=self.WHITE,
+            fg=self.GREEN,
+            activebackground="#f3f6f3",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.LINE,
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=10,
+            pady=7,
+        ).pack(side="left", padx=(6, 0))
+        tk.Label(printer_row, textvariable=self.printer_status, bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(5, 0))
+
         paper_frame = tk.Frame(panel, bg="#f2f5f1", padx=18, pady=16)
         paper_frame.pack(fill="both", expand=True, padx=18, pady=(0, 14))
         paper_frame.grid_rowconfigure(0, weight=1)
@@ -308,7 +350,7 @@ class ReceiptApp:
         ])
         return "\n".join(lines)
 
-    def _receipt_html(self, auto_print=False):
+    def _receipt_html(self):
         store = html.escape(self.store_name.get().strip() or "Your Store")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         subtotal, tax, total = self._totals()
@@ -320,7 +362,6 @@ class ReceiptApp:
             "</tr>"
             for item in self.items
         )
-        print_script = "<script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>" if auto_print else ""
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -358,23 +399,113 @@ class ReceiptApp:
     <div class="row total"><span>TOTAL</span><span>{self._money(total)}</span></div>
   </section>
   <footer>Thank you for shopping with us!</footer>
-  {print_script}
 </body>
 </html>"""
+
+    def _refresh_printers(self):
+        try:
+            import win32print
+
+            flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            printers = sorted({printer["pPrinterName"] for printer in win32print.EnumPrinters(flags, None, 2)})
+            try:
+                default_printer = win32print.GetDefaultPrinter()
+            except Exception:
+                default_printer = ""
+        except ImportError:
+            self.printer_selector.configure(values=())
+            self.printer_status.set("Install dependencies from requirements.txt to use printers")
+            return
+        except Exception as error:
+            self.printer_selector.configure(values=())
+            self.printer_status.set(f"Could not load printers: {error}")
+            return
+
+        self.printer_selector.configure(values=printers)
+        self.default_printer_name = default_printer
+        current = self.selected_printer.get()
+        if current not in printers:
+            self.selected_printer.set(default_printer if default_printer in printers else (printers[0] if printers else ""))
+        self.printer_status.set(f"Windows default: {default_printer}" if default_printer else "No Windows default printer is set")
+
+    def _set_default_printer(self):
+        printer_name = self.selected_printer.get()
+        if not printer_name:
+            messagebox.showinfo("Select a printer", "Choose an installed printer first.", parent=self.root)
+            return
+        try:
+            import win32print
+
+            win32print.SetDefaultPrinter(printer_name)
+            self.default_printer_name = printer_name
+            self.printer_status.set(f"Windows default: {printer_name}")
+            self.status.set(f"{printer_name} set as the default printer")
+        except ImportError:
+            messagebox.showerror("Printing support unavailable", "Install the packages listed in requirements.txt.", parent=self.root)
+        except Exception as error:
+            messagebox.showerror("Could not set default printer", str(error), parent=self.root)
 
     def _print_receipt(self):
         if not self.items:
             messagebox.showinfo("No items yet", "Add at least one item before printing a receipt.", parent=self.root)
             return
+        printer_name = self.selected_printer.get()
+        if not printer_name:
+            messagebox.showinfo("Select a printer", "Choose an installed printer before printing.", parent=self.root)
+            return
+
+        printer_dc = None
+        document_started = False
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", encoding="utf-8", delete=False) as receipt_file:
-                receipt_file.write(self._receipt_html(auto_print=True))
-                receipt_path = Path(receipt_file.name)
-            if not webbrowser.open(receipt_path.as_uri()):
-                raise OSError("No browser could open the print-ready receipt.")
-            self.status.set("Print dialog opened in your browser")
-        except OSError as error:
-            messagebox.showerror("Could not open print preview", str(error), parent=self.root)
+            import win32con
+            import win32ui
+
+            printer_dc = win32ui.CreateDC()
+            printer_dc.CreatePrinterDC(printer_name)
+            printer_dc.StartDoc(f"Receipt {self.receipt_number}")
+            document_started = True
+
+            dpi_x = printer_dc.GetDeviceCaps(win32con.LOGPIXELSX)
+            dpi_y = printer_dc.GetDeviceCaps(win32con.LOGPIXELSY)
+            page_width = printer_dc.GetDeviceCaps(win32con.HORZRES)
+            page_height = printer_dc.GetDeviceCaps(win32con.VERTRES)
+            margin_x = max(1, round(dpi_x * 0.08))
+            margin_y = max(1, round(dpi_y * 0.06))
+            font_height = max(1, round(dpi_y * 9 / 72))
+            font = win32ui.CreateFont({"name": "Courier New", "height": -font_height, "weight": 400})
+            printer_dc.SelectObject(font)
+            text_width = printer_dc.GetTextExtent("0" * 38)[0]
+            available_width = page_width - 2 * margin_x
+            if text_width > available_width:
+                font_height = max(1, int(font_height * available_width / text_width))
+                font = win32ui.CreateFont({"name": "Courier New", "height": -font_height, "weight": 400})
+                printer_dc.SelectObject(font)
+
+            line_height = max(font_height + 2, round(dpi_y * 0.18))
+            lines_per_page = max(1, (page_height - 2 * margin_y) // line_height)
+            lines = self._receipt_text().splitlines()
+            self.status.set(f"Sending receipt to {printer_name}...")
+            self.root.update_idletasks()
+
+            for page_start in range(0, len(lines), lines_per_page):
+                printer_dc.StartPage()
+                for line_number, line in enumerate(lines[page_start:page_start + lines_per_page]):
+                    printer_dc.TextOut(margin_x, margin_y + line_number * line_height, line)
+                printer_dc.EndPage()
+            printer_dc.EndDoc()
+            document_started = False
+            self.status.set(f"Receipt sent to {printer_name}")
+        except Exception as error:
+            if document_started and printer_dc:
+                try:
+                    printer_dc.AbortDoc()
+                except Exception:
+                    pass
+            self.status.set("Printing failed")
+            messagebox.showerror("Could not print receipt", str(error), parent=self.root)
+        finally:
+            if printer_dc:
+                printer_dc.DeleteDC()
 
     def _save_receipt(self):
         if not self.items:
