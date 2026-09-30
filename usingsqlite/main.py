@@ -1,11 +1,11 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import html
-import os
+import sqlite3
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from pathlib import Path
-from storage import DatabaseError, ReceiptDatabase
+from storage import ReceiptDatabase
 
 
 class LoginWindow:
@@ -141,28 +141,18 @@ class ReceiptApp:
         self.root = root
         self.database = database
         self.current_user = current_user
-        try:
-            configured_tax = Decimal(os.environ.get("RECEIPT_TAX_RATE", "0.07"))
-            if not configured_tax.is_finite() or not Decimal("0") <= configured_tax <= Decimal("1"):
-                raise InvalidOperation
-            self.TAX_RATE = configured_tax
-        except InvalidOperation as error:
-            raise RuntimeError("RECEIPT_TAX_RATE must be a decimal from 0 to 1, such as 0.165 for 16.5%.") from error
         self.root.title("Receipt Studio")
         self.root.geometry("1120x790")
-        self.root.minsize(720, 600)
-        self.root.resizable(True, True)
+        self.root.minsize(940, 680)
         self.root.configure(bg=self.BG)
 
         self.items = []
         self.receipt_number = datetime.now().strftime("%y%m%d-%H%M%S-%f")
-        self.store_name = tk.StringVar(value=os.environ.get("RECEIPT_STORE_NAME", "Corner Market"))
+        self.store_name = tk.StringVar(value="Corner Market")
         self.item_name = tk.StringVar()
         self.item_price = tk.StringVar()
         self.item_quantity = tk.StringVar(value="1")
-        self.scan_code = tk.StringVar()
         self.products_by_name = {}
-        self.products_by_barcode = {}
         self.seller_selection = tk.StringVar()
         self.cashiers_by_label = {}
         self.sale_id = None
@@ -171,17 +161,13 @@ class ReceiptApp:
         self.selected_printer = tk.StringVar()
         self.printer_status = tk.StringVar(value="Loading printers...")
         self.default_printer_name = ""
-        self.payment_method = "Cash"
-        self.amount_received = Decimal("0.00")
 
         self._configure_styles()
         self._build_layout()
-        self.root.bind("<Configure>", self._resize_layout)
         self._refresh_printers()
         self._refresh_cashiers()
         self._refresh_products()
         self._refresh_receipt()
-        self.scan_entry.focus_set()
 
     def _configure_styles(self):
         style = ttk.Style(self.root)
@@ -213,36 +199,30 @@ class ReceiptApp:
         brand = tk.Frame(header, bg=self.INK)
         brand.pack(side="left", padx=28, pady=17)
         tk.Label(brand, text="RECEIPT STUDIO", bg=self.INK, fg="#a9d7bd", font=("Segoe UI Semibold", 9)).pack(anchor="w")
-        self.brand_tagline = tk.Label(brand, text="Make the sale. Print the proof.", bg=self.INK, fg=self.WHITE, font=("Segoe UI Semibold", 19))
-        self.brand_tagline.pack(anchor="w", pady=(2, 0))
+        tk.Label(brand, text="Make the sale. Print the proof.", bg=self.INK, fg=self.WHITE, font=("Segoe UI Semibold", 19)).pack(anchor="w", pady=(2, 0))
 
-        self.header_ready = tk.Label(
+        tk.Label(
             header,
             text="●  READY",
             bg=self.INK,
             fg="#9fe0b8",
             font=("Segoe UI Semibold", 9),
-        )
-        self.header_ready.pack(side="right", padx=30)
-        self.header_identity = tk.Label(
+        ).pack(side="right", padx=30)
+        tk.Label(
             header,
             text=f"SIGNED IN  {self.current_user['full_name']} (@{self.current_user['username']})",
             bg=self.INK,
             fg="#d7e7dc",
             font=("Segoe UI Semibold", 9),
-        )
-        self.header_identity.pack(side="right", padx=(0, 12))
+        ).pack(side="right", padx=(0, 12))
         tk.Button(header, text="LOG OUT", command=self._logout, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=10, pady=8).pack(side="right", padx=(0, 8))
         tk.Button(header, text="SUPERUSER", command=self._open_superuser, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
         if self.current_user["role"] == "superuser":
             tk.Button(header, text="STOCK", command=self._open_stock_manager, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
         tk.Button(header, text="PURCHASES", command=self._open_history, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
-        if self.current_user["role"] == "superuser":
-            tk.Button(header, text="TODAY", command=self._open_daily_report, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
 
         content = tk.Frame(self.root, bg=self.BG)
-        self.content = content
-        content.pack(fill="both", expand=True, padx=22, pady=12)
+        content.pack(fill="both", expand=True, padx=22, pady=20)
         content.grid_columnconfigure(0, weight=6, uniform="columns")
         content.grid_columnconfigure(1, weight=5, uniform="columns")
         content.grid_rowconfigure(0, weight=1)
@@ -250,7 +230,6 @@ class ReceiptApp:
         left = tk.Frame(content, bg=self.BG)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         right = tk.Frame(content, bg=self.BG)
-        self.left_panel, self.right_panel = left, right
         right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
         self._build_sale_panel(left)
@@ -258,34 +237,9 @@ class ReceiptApp:
         self._build_preview_panel(right)
 
         footer = tk.Frame(self.root, bg=self.BG)
-        footer.pack(fill="x", padx=26, pady=(0, 8))
+        footer.pack(fill="x", padx=26, pady=(0, 12))
         tk.Label(footer, textvariable=self.status, bg=self.BG, fg=self.MUTED, font=("Segoe UI", 9)).pack(side="left")
-        tk.Label(footer, text=f"Tax  {self.TAX_RATE * 100:g}%", bg=self.BG, fg=self.MUTED, font=("Segoe UI", 9)).pack(side="right")
-
-    def _resize_layout(self, event):
-        if event.widget is not self.root or not hasattr(self, "left_panel"):
-            return
-        if event.width < 940:
-            self.brand_tagline.pack_forget()
-            self.header_identity.pack_forget()
-            self.header_ready.pack_forget()
-            self.content.grid_columnconfigure(0, weight=1, uniform="columns")
-            self.content.grid_columnconfigure(1, weight=1, uniform="columns")
-            self.content.grid_rowconfigure(0, weight=3)
-            self.content.grid_rowconfigure(1, weight=2)
-            self.left_panel.grid_configure(row=0, column=0, columnspan=2, padx=0, pady=(0, 8))
-            self.right_panel.grid_configure(row=1, column=0, columnspan=2, padx=0, pady=(0, 0))
-        else:
-            if not self.brand_tagline.winfo_manager():
-                self.brand_tagline.pack(anchor="w", pady=(2, 0))
-            if not self.header_identity.winfo_manager():
-                self.header_identity.pack(side="right", padx=(0, 12))
-            if not self.header_ready.winfo_manager():
-                self.header_ready.pack(side="right", padx=30)
-            self.content.grid_rowconfigure(0, weight=1)
-            self.content.grid_rowconfigure(1, weight=0)
-            self.left_panel.grid_configure(row=0, column=0, columnspan=1, padx=(0, 10), pady=0)
-            self.right_panel.grid_configure(row=0, column=1, columnspan=1, padx=(10, 0), pady=0)
+        tk.Label(footer, text="Tax  7%", bg=self.BG, fg=self.MUTED, font=("Segoe UI", 9)).pack(side="right")
 
     def _panel(self, parent, title, subtitle=None):
         panel = tk.Frame(parent, bg=self.WHITE, highlightbackground=self.LINE, highlightthickness=1)
@@ -297,18 +251,16 @@ class ReceiptApp:
         return panel
 
     def _build_sale_panel(self, parent):
-        panel = self._panel(parent, "Sale details")
+        panel = self._panel(parent, "Sale details", "Your shop name appears at the top of the receipt.")
         panel.pack(fill="x", pady=(0, 12))
         fields = tk.Frame(panel, bg=self.WHITE)
-        fields.pack(fill="x", padx=18, pady=(0, 12))
-        fields.grid_columnconfigure(0, weight=1)
-        fields.grid_columnconfigure(1, weight=1)
-        tk.Label(fields, text="BUSINESS NAME", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 5))
+        fields.pack(fill="x", padx=18, pady=(0, 16))
+        tk.Label(fields, text="BUSINESS NAME", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(0, 5))
         self.store_entry = self._entry(fields, self.store_name)
-        self.store_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8))
-        tk.Label(fields, text="SELLER", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 5))
+        self.store_entry.pack(fill="x")
+        tk.Label(fields, text="SELLER", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(10, 5))
         self.seller_selector = ttk.Combobox(fields, textvariable=self.seller_selection, state="readonly")
-        self.seller_selector.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        self.seller_selector.pack(fill="x")
         self.seller_selector.bind("<<ComboboxSelected>>", lambda _: self._refresh_receipt())
         self.store_name.trace_add("write", lambda *_: self._refresh_receipt())
 
@@ -328,18 +280,11 @@ class ReceiptApp:
         )
 
     def _build_items_panel(self, parent):
-        panel = self._panel(parent, "Line items")
+        panel = self._panel(parent, "Line items", "Select a stocked product and quantity to build the sale.")
         panel.pack(fill="both", expand=True)
 
-        scanner = tk.Frame(panel, bg=self.WHITE)
-        scanner.pack(fill="x", padx=18, pady=(0, 6))
-        tk.Label(scanner, text="BARCODE / QR CODE", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(0, 5))
-        self.scan_entry = self._entry(scanner, self.scan_code)
-        self.scan_entry.pack(fill="x")
-        self.scan_entry.bind("<Return>", self._scan_product)
-
         form = tk.Frame(panel, bg=self.WHITE)
-        form.pack(fill="x", padx=18, pady=(0, 8))
+        form.pack(fill="x", padx=18, pady=(0, 15))
         tk.Label(form, text="PRODUCT", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=0, sticky="w", pady=(0, 5))
         tk.Label(form, text="PRICE (K)", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 5))
         tk.Label(form, text="QTY", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=2, sticky="w", padx=(8, 0), pady=(0, 5))
@@ -387,7 +332,7 @@ class ReceiptApp:
         self.table.bind("<Delete>", lambda _: self._remove_selected())
 
         actions = tk.Frame(panel, bg=self.WHITE)
-        actions.pack(fill="x", padx=18, pady=(8, 10))
+        actions.pack(fill="x", padx=18, pady=12)
         self.remove_button = tk.Button(actions, text="Remove selected", command=self._remove_selected, bg=self.WHITE, fg=self.MUTED, activebackground="#f3f6f3", relief="flat", cursor="hand2", font=("Segoe UI", 9))
         self.remove_button.pack(side="left")
         self.clear_button = tk.Button(actions, text="Clear sale", command=self._clear_sale, bg=self.WHITE, fg="#a14e42", activebackground="#fbf2f0", relief="flat", cursor="hand2", font=("Segoe UI", 9))
@@ -498,7 +443,7 @@ class ReceiptApp:
         self.item_quantity.set("1")
         self.stock_status.configure(text="")
         self.name_entry.focus_set()
-        self.status.set(f"Added {name} · K {product['unit_price_cents'] / 100:.2f} each")
+        self.status.set(f"Added {name}")
         self._refresh_receipt()
 
     def _remove_selected(self):
@@ -531,12 +476,10 @@ class ReceiptApp:
         self.items.clear()
         self.sale_id = None
         self.saved_sale = None
-        self.payment_method = "Cash"
-        self.amount_received = Decimal("0.00")
         self.receipt_number = datetime.now().strftime("%y%m%d-%H%M%S-%f")
         self.store_entry.configure(state="normal")
         self.seller_selector.configure(state="disabled" if self.current_user["role"] == "cashier" else "readonly")
-        for control in (self.scan_entry, self.name_entry, self.item_price_entry, self.item_quantity_entry, self.add_item_button, self.remove_button, self.clear_button):
+        for control in (self.name_entry, self.item_price_entry, self.item_quantity_entry, self.add_item_button, self.remove_button, self.clear_button):
             control.configure(state="normal")
         self.name_entry.configure(state="readonly")
         self.item_price_entry.configure(state="readonly")
@@ -568,9 +511,6 @@ class ReceiptApp:
     def _refresh_products(self):
         products = self.database.list_products()
         self.products_by_name = {product["name"]: product for product in products}
-        self.products_by_barcode = {
-            product["barcode"]: product for product in products if product.get("barcode")
-        }
         if hasattr(self, "name_entry"):
             self.name_entry.configure(values=list(self.products_by_name))
             if self.item_name.get() not in self.products_by_name:
@@ -588,23 +528,6 @@ class ReceiptApp:
         self.item_price.set(f"{product['unit_price_cents'] / 100:.2f}")
         reserved = sum(item["quantity"] for item in self.items if item["product_id"] == product["product_id"])
         self.stock_status.configure(text=f"In stock: {product['stock_quantity'] - reserved}")
-
-    def _scan_product(self, _event=None):
-        barcode = self.scan_code.get().strip()
-        self.scan_code.set("")
-        if not barcode:
-            return "break"
-        product = self.products_by_barcode.get(barcode)
-        if product is None:
-            self.status.set("No matching barcode; choose the product manually below.")
-            self.name_entry.focus_set()
-            return "break"
-        self.item_name.set(product["name"])
-        self._select_product()
-        self._add_item()
-        if self.sale_id is None:
-            self.scan_entry.focus_set()
-        return "break"
 
     def _complete_sale(self):
         if self.sale_id is not None:
@@ -632,10 +555,6 @@ class ReceiptApp:
             if verified_seller is None:
                 messagebox.showerror("PIN not accepted", "The cashier PIN was not accepted.", parent=self.root)
                 return
-        payment = self._collect_payment()
-        if payment is None:
-            return
-        self.payment_method, self.amount_received = payment
         try:
             self.sale_id = self.database.create_sale(
                 self.receipt_number,
@@ -643,15 +562,11 @@ class ReceiptApp:
                 self.store_name.get().strip() or "Your Store",
                 self.items,
                 tax_rate=self.TAX_RATE,
-                payment_method=self.payment_method,
-                amount_received=self.amount_received,
             )
-        except (DatabaseError, ValueError) as error:
+        except (sqlite3.Error, ValueError) as error:
             messagebox.showerror("Could not save sale", str(error), parent=self.root)
             return
         self.saved_sale = self.database.get_sale(self.sale_id)
-        self.payment_method = self.saved_sale.get("payment_method", self.payment_method)
-        self.amount_received = Decimal(self.saved_sale.get("amount_received_cents", 0)) / 100
         self.items = [
             {
                 "product_id": item["product_id"],
@@ -664,58 +579,11 @@ class ReceiptApp:
         self._refresh_products()
         self.store_entry.configure(state="disabled")
         self.seller_selector.configure(state="disabled")
-        for control in (self.scan_entry, self.name_entry, self.item_price_entry, self.item_quantity_entry, self.add_item_button, self.remove_button, self.clear_button):
+        for control in (self.name_entry, self.item_price_entry, self.item_quantity_entry, self.add_item_button, self.remove_button, self.clear_button):
             control.configure(state="disabled")
         self.new_sale_button.configure(state="normal")
         self.status.set(f"Sale recorded for {verified_seller['full_name']}")
         self._refresh_receipt()
-
-    def _collect_payment(self):
-        _, _, total = self._totals()
-        window = tk.Toplevel(self.root)
-        window.title("Take payment")
-        window.geometry("380x300")
-        window.resizable(False, False)
-        window.configure(bg=self.BG)
-        window.transient(self.root)
-        window.grab_set()
-        method = tk.StringVar(window, value="Cash")
-        received = tk.StringVar(window, value=f"{total:.2f}")
-        result = {"value": None}
-        tk.Label(window, text="PAYMENT", bg=self.BG, fg=self.GREEN, font=("Segoe UI Semibold", 9)).pack(anchor="w", padx=24, pady=(22, 3))
-        tk.Label(window, text=f"Amount due  {self._money(total)}", bg=self.BG, fg=self.INK, font=("Segoe UI Semibold", 18)).pack(anchor="w", padx=24, pady=(0, 14))
-        form = tk.Frame(window, bg=self.BG)
-        form.pack(fill="x", padx=24)
-        tk.Label(form, text="PAYMENT METHOD", bg=self.BG, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(0, 5))
-        ttk.Combobox(form, textvariable=method, values=("Cash", "Card", "Mobile Money", "Other"), state="readonly").pack(fill="x")
-        tk.Label(form, text="AMOUNT RECEIVED (K)", bg=self.BG, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(12, 5))
-        amount_entry = self._entry(form, received)
-        amount_entry.pack(fill="x")
-        def update_method(*_):
-            if method.get() == "Cash":
-                amount_entry.configure(state="normal")
-            else:
-                received.set(f"{total:.2f}")
-                amount_entry.configure(state="disabled")
-        method.trace_add("write", update_method)
-        actions = tk.Frame(window, bg=self.BG)
-        actions.pack(fill="x", padx=24, pady=20)
-        def accept():
-            try:
-                amount = Decimal(received.get().strip())
-                if not amount.is_finite() or amount < total:
-                    raise InvalidOperation
-            except (InvalidOperation, ValueError):
-                messagebox.showerror("Invalid payment", f"Amount received must be at least {self._money(total)}.", parent=window)
-                return
-            result["value"] = (method.get(), amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-            window.destroy()
-        tk.Button(actions, text="Cancel", command=window.destroy, bg=self.WHITE, fg=self.INK, relief="flat", padx=14, pady=9).pack(side="left")
-        tk.Button(actions, text="Confirm payment", command=accept, bg=self.GREEN, fg=self.WHITE, relief="flat", padx=14, pady=9).pack(side="right")
-        amount_entry.bind("<Return>", lambda _: accept())
-        amount_entry.focus_set()
-        self.root.wait_window(window)
-        return result["value"]
 
     def _open_superuser(self):
         if self.current_user["role"] != "superuser":
@@ -730,8 +598,8 @@ class ReceiptApp:
 
         window = tk.Toplevel(self.root)
         window.title("Stock management")
-        window.geometry("860x560")
-        window.minsize(760, 460)
+        window.geometry("720x540")
+        window.minsize(620, 440)
         window.configure(bg=self.BG)
         tk.Label(window, text="INVENTORY", bg=self.BG, fg=self.GREEN, font=("Segoe UI Semibold", 9)).pack(anchor="w", padx=24, pady=(20, 4))
         tk.Label(window, text="Add or restock products", bg=self.BG, fg=self.INK, font=("Segoe UI Semibold", 19)).pack(anchor="w", padx=24)
@@ -742,10 +610,9 @@ class ReceiptApp:
         form.pack(fill="x", padx=16, pady=14)
         fields = {}
         for column, (label, key, width) in enumerate((
-            ("PRODUCT", "name", 20),
-            ("BARCODE / QR CODE", "barcode", 20),
-            ("UNIT PRICE (K)", "price", 12),
-            ("QUANTITY TO ADD", "quantity", 12),
+            ("PRODUCT", "name", 24),
+            ("UNIT PRICE (K)", "price", 14),
+            ("QUANTITY TO ADD", "quantity", 14),
         )):
             tk.Label(form, text=label, bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=column, sticky="w", padx=(0, 10), pady=(0, 5))
             fields[key] = tk.StringVar(window)
@@ -754,28 +621,14 @@ class ReceiptApp:
 
         table_frame = tk.Frame(window, bg=self.WHITE, highlightbackground=self.LINE, highlightthickness=1)
         table_frame.pack(fill="both", expand=True, padx=24, pady=(0, 20))
-        columns = ("product", "barcode", "price", "stock")
+        columns = ("product", "price", "stock")
         products_table = ttk.Treeview(table_frame, columns=columns, show="headings", style="Receipt.Treeview")
-        for column, title in (("product", "PRODUCT"), ("barcode", "BARCODE / QR"), ("price", "UNIT PRICE"), ("stock", "IN STOCK")):
+        for column, title in (("product", "PRODUCT"), ("price", "UNIT PRICE"), ("stock", "IN STOCK")):
             products_table.heading(column, text=title, anchor="w")
-        products_table.column("product", width=220, anchor="w")
-        products_table.column("barcode", width=250, anchor="w")
-        products_table.column("price", width=130, anchor="e")
-        products_table.column("stock", width=100, anchor="center")
+        products_table.column("product", width=300, anchor="w")
+        products_table.column("price", width=140, anchor="e")
+        products_table.column("stock", width=110, anchor="center")
         products_table.pack(fill="both", expand=True, padx=14, pady=14)
-        products_table.tag_configure("low_stock", foreground="#a14e42")
-        def load_selected(_event=None):
-            selected = products_table.selection()
-            if not selected:
-                return
-            product = next((product for product in self.database.list_products() if str(product["product_id"]) == selected[0]), None)
-            if product:
-                fields["name"].set(product["name"])
-                fields["barcode"].set(product.get("barcode") or "")
-                fields["price"].set(f"{product['unit_price_cents'] / 100:.2f}")
-                fields["quantity"].set(str(product["stock_quantity"]))
-                self.status.set("Product loaded. Save changes to replace its on hand quantity.")
-        products_table.bind("<<TreeviewSelect>>", load_selected)
 
         def refresh_products():
             self._refresh_products()
@@ -783,9 +636,7 @@ class ReceiptApp:
             for product in self.database.list_products():
                 products_table.insert(
                     "", "end",
-                    iid=str(product["product_id"]),
-                    values=(product["name"], product.get("barcode") or "", self._money(product["unit_price_cents"] / 100), product["stock_quantity"]),
-                    tags=("low_stock",) if product["stock_quantity"] <= 5 else (),
+                    values=(product["name"], self._money(product["unit_price_cents"] / 100), product["stock_quantity"]),
                 )
 
         def add_stock():
@@ -795,35 +646,17 @@ class ReceiptApp:
                     fields["name"].get(),
                     fields["price"].get(),
                     fields["quantity"].get(),
-                    fields["barcode"].get(),
                 )
-            except (DatabaseError, ValueError) as error:
+            except (sqlite3.Error, ValueError) as error:
                 messagebox.showerror("Could not add stock", str(error), parent=window)
                 return
             fields["name"].set("")
-            fields["barcode"].set("")
             fields["price"].set("")
             fields["quantity"].set("")
             refresh_products()
             self.status.set("Inventory updated")
 
-        def save_product():
-            selected = products_table.selection()
-            if not selected:
-                messagebox.showinfo("Select a product", "Choose a product to update its details or on hand quantity.", parent=window)
-                return
-            try:
-                self.database.update_product(self.current_user["user_id"], int(selected[0]), fields["name"].get(), fields["price"].get(), fields["quantity"].get(), fields["barcode"].get())
-            except (DatabaseError, ValueError) as error:
-                messagebox.showerror("Could not update product", str(error), parent=window)
-                return
-            refresh_products()
-            self.status.set("Product details and stock updated")
-
-        stock_actions = tk.Frame(form_panel, bg=self.WHITE)
-        stock_actions.pack(fill="x", padx=16, pady=(0, 14))
-        tk.Button(stock_actions, text="Save selected product", command=save_product, bg=self.WHITE, fg=self.GREEN, relief="flat", highlightthickness=1, highlightbackground=self.LINE, cursor="hand2", font=("Segoe UI Semibold", 9), padx=14, pady=8).pack(side="left")
-        tk.Button(stock_actions, text="Add / restock", command=add_stock, bg=self.GREEN, fg=self.WHITE, activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=14, pady=8).pack(side="right")
+        tk.Button(form_panel, text="Add stock", command=add_stock, bg=self.GREEN, fg=self.WHITE, activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=14, pady=8).pack(anchor="e", padx=16, pady=(0, 14))
         refresh_products()
 
     def _logout(self):
@@ -895,7 +728,7 @@ class ReceiptApp:
         def add_cashier():
             try:
                 self.database.add_user(fields["full_name"].get(), fields["username"].get(), fields["phone"].get(), fields["pin"].get())
-            except (ValueError, DatabaseError) as error:
+            except (ValueError, sqlite3.IntegrityError) as error:
                 messagebox.showerror("Could not add cashier", str(error), parent=window)
                 return
             for value in fields.values():
@@ -906,41 +739,6 @@ class ReceiptApp:
 
         tk.Button(form_panel, text="Add cashier", command=add_cashier, bg=self.GREEN, fg=self.WHITE, activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=14, pady=9).pack(anchor="w", padx=16, pady=16)
         refresh_users()
-
-    def _open_daily_report(self):
-        if self.current_user["role"] != "superuser":
-            messagebox.showerror("Access denied", "Daily sales reports are available to a superuser.", parent=self.root)
-            return
-        today = datetime.now().astimezone().date().isoformat()
-        try:
-            sales = [sale for sale in self.database.list_sales() if str(sale["sold_at"])[:10] == today]
-        except DatabaseError as error:
-            messagebox.showerror("Could not load report", str(error), parent=self.root)
-            return
-        active = [sale for sale in sales if not sale["reversed_at"]]
-        gross = sum(int(sale["total_cents"]) for sale in active)
-        cash = sum(int(sale["total_cents"]) for sale in active if sale.get("payment_method", "Cash") == "Cash")
-        reversed_total = sum(int(sale["total_cents"]) for sale in sales if sale["reversed_at"])
-        window = tk.Toplevel(self.root)
-        window.title("Today's sales")
-        window.geometry("640x520")
-        window.minsize(480, 380)
-        window.configure(bg=self.BG)
-        tk.Label(window, text="SHIFT SUMMARY", bg=self.BG, fg=self.GREEN, font=("Segoe UI Semibold", 9)).pack(anchor="w", padx=24, pady=(22, 4))
-        tk.Label(window, text=f"Sales for {today}", bg=self.BG, fg=self.INK, font=("Segoe UI Semibold", 20)).pack(anchor="w", padx=24)
-        cards = tk.Frame(window, bg=self.BG)
-        cards.pack(fill="x", padx=24, pady=18)
-        for label, value in (("COMPLETED SALES", str(len(active))), ("NET SALES", self._money(gross / 100)), ("CASH SALES", self._money(cash / 100)), ("REVERSED", self._money(reversed_total / 100))):
-            card = tk.Frame(cards, bg=self.WHITE, highlightbackground=self.LINE, highlightthickness=1)
-            card.pack(fill="x", pady=4)
-            tk.Label(card, text=label, bg=self.WHITE, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=14, pady=(9, 0))
-            tk.Label(card, text=value, bg=self.WHITE, fg=self.INK, font=("Segoe UI Semibold", 15)).pack(anchor="w", padx=14, pady=(1, 9))
-        methods = {}
-        for sale in active:
-            key = sale.get("payment_method", "Cash")
-            methods[key] = methods.get(key, 0) + int(sale["total_cents"])
-        tk.Label(window, text="PAYMENT BREAKDOWN", bg=self.BG, fg=self.MUTED, font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=24)
-        tk.Label(window, text="   ·   ".join(f"{key}: {self._money(cents / 100)}" for key, cents in sorted(methods.items())) or "No completed sales", bg=self.BG, fg=self.INK, font=("Segoe UI", 10), wraplength=560, justify="left").pack(anchor="w", padx=24, pady=(5, 18))
 
     def _open_history(self):
         window = tk.Toplevel(self.root)
@@ -1013,12 +811,9 @@ class ReceiptApp:
             lines.extend([
                 "-" * 38,
                 f"{'Subtotal':<24}{self._money(sale['subtotal_cents'] / 100):>14}",
-                f"{'Tax (' + format(Decimal(str(sale.get('tax_rate', self.TAX_RATE))) * 100, 'g') + '%)':<24}{self._money(sale['tax_cents'] / 100):>14}",
+                f"{'Tax (7%)':<24}{self._money(sale['tax_cents'] / 100):>14}",
                 "=" * 38,
                 f"{'TOTAL':<24}{self._money(sale['total_cents'] / 100):>14}",
-                f"{'Payment: ' + sale.get('payment_method', 'Cash')}",
-                f"{'Received':<24}{self._money(sale.get('amount_received_cents', sale['total_cents']) / 100):>14}",
-                f"{'Change':<24}{self._money(sale.get('change_cents', 0) / 100):>14}",
                 "=" * 38,
             ])
             detail.insert("1.0", "\n".join(lines))
@@ -1069,7 +864,7 @@ class ReceiptApp:
                 return
             try:
                 self.database.reverse_sale(sale_id, self.current_user["user_id"], pin)
-            except (DatabaseError, ValueError) as error:
+            except (sqlite3.Error, ValueError) as error:
                 messagebox.showerror("Could not reverse sale", str(error), parent=window)
                 return
             refresh_sales()
@@ -1079,8 +874,6 @@ class ReceiptApp:
         refresh_sales()
 
     def _totals(self):
-        if self.saved_sale:
-            return tuple(Decimal(self.saved_sale[f"{name}_cents"]) / 100 for name in ("subtotal", "tax", "total"))
         subtotal = sum(
             (Decimal(str(item["price"])) * item["quantity"] for item in self.items),
             Decimal("0.00"),
@@ -1110,8 +903,11 @@ class ReceiptApp:
         store = self.store_name.get().strip() or "Your Store"
         timestamp = self.saved_sale["sold_at"] if self.saved_sale else datetime.now().strftime("%Y-%m-%d  %H:%M")
         subtotal, tax, total = self._totals()
-        tax_rate = Decimal(str(self.saved_sale.get("tax_rate", self.TAX_RATE))) if self.saved_sale else Decimal(str(self.TAX_RATE))
         width = 38
+        seller = self.saved_sale["seller_name"] if self.saved_sale else None
+        if seller is None:
+            selected_seller = self.cashiers_by_label.get(self.seller_selection.get())
+            seller = selected_seller["full_name"] if selected_seller else None
         lines = [
             store.upper().center(width),
             "RECEIPT".center(width),
@@ -1122,6 +918,8 @@ class ReceiptApp:
             f"{'ITEM':<19}{'QTY':>4}{'AMOUNT':>15}",
             "-" * width,
         ]
+        if seller:
+            lines.insert(5, f"Seller: {seller}")
         if not self.items:
             lines.extend(["", "   Your receipt will appear here.", "   Add an item to get started.", ""])
         else:
@@ -1132,12 +930,9 @@ class ReceiptApp:
         lines.extend([
             "-" * width,
             f"{'Subtotal':<23}{self._money(subtotal):>15}",
-            f"{'Tax (' + format(tax_rate * 100, 'g') + '%)':<23}{self._money(tax):>15}",
+            f"{'Tax (7%)':<23}{self._money(tax):>15}",
             "=" * width,
             f"{'TOTAL':<23}{self._money(total):>15}",
-            f"{'Payment':<23}{self.payment_method:>15}" if self.saved_sale else "",
-            f"{'Received':<23}{self._money(self.amount_received):>15}" if self.saved_sale else "",
-            f"{'Change':<23}{self._money(max(Decimal('0'), self.amount_received - total)):>15}" if self.saved_sale else "",
             "=" * width,
             "",
             "       Thank you for shopping with us!",
@@ -1146,9 +941,13 @@ class ReceiptApp:
 
     def _receipt_html(self):
         store = html.escape(self.store_name.get().strip() or "Your Store")
+        seller = self.saved_sale["seller_name"] if self.saved_sale else None
+        if seller is None:
+            selected_seller = self.cashiers_by_label.get(self.seller_selection.get())
+            seller = selected_seller["full_name"] if selected_seller else None
+        seller_line = f"<br>Sold by: {html.escape(seller)}" if seller else ""
         timestamp = self.saved_sale["sold_at"] if self.saved_sale else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         subtotal, tax, total = self._totals()
-        tax_rate = Decimal(str(self.saved_sale.get("tax_rate", self.TAX_RATE))) if self.saved_sale else Decimal(str(self.TAX_RATE))
         rows = "".join(
             "<tr>"
             f"<td>{html.escape(item['name'])}<small>{self._money(item['price'])} each</small></td>"
@@ -1186,13 +985,12 @@ class ReceiptApp:
 </head>
 <body>
   <header><h1>{store}</h1><div class="receipt-title">RECEIPT</div></header>
-    <div class="meta">No. {html.escape(self.receipt_number)}<br>{timestamp}</div>
+    <div class="meta">No. {html.escape(self.receipt_number)}<br>{timestamp}{seller_line}</div>
   <table><thead><tr><th>ITEM</th><th class="qty">QTY</th><th class="amount">AMOUNT</th></tr></thead><tbody>{rows}</tbody></table>
   <section class="totals">
     <div class="row"><span>Subtotal</span><span>{self._money(subtotal)}</span></div>
-    <div class="row"><span>Tax ({tax_rate * 100:g}%)</span><span>{self._money(tax)}</span></div>
+    <div class="row"><span>Tax (7%)</span><span>{self._money(tax)}</span></div>
     <div class="row total"><span>TOTAL</span><span>{self._money(total)}</span></div>
-    {f"<div class='row'><span>Payment</span><span>{html.escape(self.payment_method)}</span></div><div class='row'><span>Received</span><span>{self._money(self.amount_received)}</span></div><div class='row'><span>Change</span><span>{self._money(max(Decimal('0'), self.amount_received-total))}</span></div>" if self.saved_sale else ""}
   </section>
   <footer>Thank you for shopping with us!</footer>
 </body>
@@ -1340,12 +1138,7 @@ def _show_login(root, database):
 
 def main():
     root = tk.Tk()
-    try:
-        database = ReceiptDatabase()
-    except (DatabaseError, RuntimeError) as error:
-        messagebox.showerror("MySQL connection unavailable", str(error), parent=root)
-        root.destroy()
-        return
+    database = ReceiptDatabase()
     _show_login(root, database)
     root.mainloop()
 
