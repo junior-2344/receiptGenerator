@@ -233,7 +233,8 @@ class ReceiptApp:
         )
         self.header_identity.pack(side="right", padx=(0, 12))
         tk.Button(header, text="LOG OUT", command=self._logout, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=10, pady=8).pack(side="right", padx=(0, 8))
-        tk.Button(header, text="SUPERUSER", command=self._open_superuser, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
+        if self.current_user["role"] == "superuser":
+            tk.Button(header, text="TEAM", command=self._open_superuser, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
         if self.current_user["role"] == "superuser":
             tk.Button(header, text="STOCK", command=self._open_stock_manager, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
         tk.Button(header, text="PURCHASES", command=self._open_history, bg=self.INK, fg="#d7e7dc", activebackground=self.GREEN_DARK, activeforeground=self.WHITE, relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=12, pady=8).pack(side="right", padx=(0, 8))
@@ -543,6 +544,7 @@ class ReceiptApp:
         self.new_sale_button.configure(state="disabled")
         self.status.set("New sale started")
         self._refresh_receipt()
+        self.scan_entry.focus_set()
 
     def _refresh_cashiers(self):
         users = self.database.list_users(role="cashier")
@@ -667,8 +669,19 @@ class ReceiptApp:
         for control in (self.scan_entry, self.name_entry, self.item_price_entry, self.item_quantity_entry, self.add_item_button, self.remove_button, self.clear_button):
             control.configure(state="disabled")
         self.new_sale_button.configure(state="normal")
-        self.status.set(f"Sale recorded for {verified_seller['full_name']}")
+        change = max(Decimal("0"), self.amount_received - self._totals()[2])
+        self.status.set(f"Paid {self._money(self._totals()[2])} · change {self._money(change)} · starting next order")
         self._refresh_receipt()
+        if messagebox.askyesno(
+            "Payment complete",
+            f"Order {self.receipt_number} is paid and recorded.\n\n"
+            f"Total: {self._money(self._totals()[2])}\n"
+            f"Change: {self._money(change)}\n\n"
+            "Print this receipt before starting the next order?",
+            parent=self.root,
+        ):
+            self._print_receipt()
+        self._new_sale()
 
     def _collect_payment(self):
         _, _, total = self._totals()
